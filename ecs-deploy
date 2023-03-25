@@ -28,6 +28,8 @@ RUN_TASK_NETWORK_CONFIGURATION=false
 RUN_TASK_WAIT_FOR_SUCCESS=false
 TASK_DEFINITION_TAGS=false
 COPY_TASK_DEFINITION_TAGS=false
+RUN_MIGRATIONS=false
+DJANGO_CONTAINER_NAME=false
 
 function usage() {
     cat <<EOM
@@ -113,8 +115,6 @@ EOM
 }
 
 
-
-
 # Check requirements
 function require() {
     command -v "$1" > /dev/null 2>&1 || {
@@ -198,6 +198,11 @@ function assertRequiredArgumentsSet() {
 
     if [ $RUN_TASK == false ] && [ $RUN_TASK_PLATFORM_VERSION != false ]; then
         echo 'PLATFORM VERSION requires setting RUN TASK argument. You can set it using --run-task flag.'
+        exit 12
+    fi
+
+    if [ $DJANGO_CONTAINER_NAME == false ] && [ $RUN_MIGRATIONS == true ]; then
+        echo 'RUN_MIGRATIONS requires setting DJANGO CONTAINER NAME argument. You can set it using --django-container-name.'
         exit 12
     fi
 
@@ -423,6 +428,7 @@ function updateServiceForceNewDeployment() {
 }
 
 function updateService() {
+    echo "Updating service to use new task definition"
     if [[ $(echo ${NEW_DEF} | jq ".containerDefinitions[0].healthCheck != null") == true ]]; then
         checkFieldName="healthStatus"
         checkFieldValue='"HEALTHY"'
@@ -601,6 +607,36 @@ function runTask {
 
 }
 
+function runMigrations {
+
+  echo "Running migrations with task definition $NEW_TASKDEF"
+  container_overrides=$(cat <<EOF
+{
+  "containerOverrides": [
+    {
+      "name": "$DJANGO_CONTAINER_NAME",
+      "command": ["python", "manage.py", "migrate"]
+    }
+  ]
+}
+EOF
+)
+  response=$(aws ecs run-task --cluster $CLUSTER --task-definition $NEW_TASKDEF --overrides "$container_overrides")
+  task_arn=$(echo $response | jq -r '.tasks[].taskArn')
+  exit_code=$(aws ecs describe-tasks --tasks $task_arn --cluster $CLUSTER | jq -r '.tasks[].containers[].exitCode')
+
+  while [[ "$exit_code" == "null" ]]
+  do
+    exit_code=$(aws ecs describe-tasks --tasks $task_arn --cluster $CLUSTER | jq -r '.tasks[].containers[].exitCode')
+    sleep 5
+  done
+
+  if [ "$exit_code" != "0" ]; then
+      echo "Migrations failed"
+      exit $exit_code
+  fi
+}
+
 ######################################################
 # When not being tested, run application as expected #
 ######################################################
@@ -721,6 +757,13 @@ if [ "$BASH_SOURCE" == "$0" ]; then
             --wait-for-success)
                 RUN_TASK_WAIT_FOR_SUCCESS=true
                 ;;
+            --run-migrations)
+                RUN_MIGRATIONS=true
+                ;;
+            --django-container-name)
+                DJANGO_CONTAINER_NAME="$2"
+                shift
+                ;;
             --network-configuration)
                 RUN_TASK_NETWORK_CONFIGURATION="$2"
                 shift
@@ -780,6 +823,11 @@ if [ "$BASH_SOURCE" == "$0" ]; then
     # register new task definition
     registerNewTaskDefinition
     echo "New task definition: $NEW_TASKDEF";
+
+    # run migration task
+    if [ $RUN_MIGRATIONS == true ]; then
+        runMigrations
+    fi
 
     # update service if needed
     if [ $SERVICE == false ]; then
