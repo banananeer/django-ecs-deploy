@@ -4,7 +4,7 @@ FROM alpine:3.13
 RUN apk --no-cache add ca-certificates curl bash jq py3-pip && \
     pip install awscli
 
-COPY django-ecs-deploy /ecs-deploy
+COPY ecs-deploy /ecs-deploy
 RUN chmod a+x /ecs-deploy
 
 COPY test.bats /test.bats
